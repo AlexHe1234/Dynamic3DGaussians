@@ -91,12 +91,12 @@ def params2cpu(params, is_initial_timestep):
     return res
 
 
-def save_params(output_params, seq, exp):
+def save_params(output_params, exp):
     to_save = {}
     for k in output_params[0].keys():
         if k in output_params[1].keys():
             to_save[k] = np.stack([params[k] for params in output_params])
         else:
             to_save[k] = output_params[0][k]
-    os.makedirs(f"./output/{exp}/{seq}", exist_ok=True)
-    np.savez(f"./output/{exp}/{seq}/params", **to_save)
+    os.makedirs(f"./output/{exp}", exist_ok=True)
+    np.savez(f"./output/{exp}/params", **to_save)

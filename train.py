@@ -12,6 +12,7 @@ from helpers import setup_camera, l1_loss_v1, l1_loss_v2, weighted_l2_loss_v1, w
 from external import calc_ssim, calc_psnr, build_rotation, densify, update_params_and_optimizer
 
 
+# TODO:
 def get_dataset(t, md, seq):
     dataset = []
     for c in range(len(md['fn'][t])):
@@ -34,6 +35,7 @@ def get_batch(todo_dataset, dataset):
     return curr_data
 
 
+# TODO:
 def initialize_params(seq, md):
     init_pt_cld = np.load(f"./data/{seq}/init_pt_cld.npz")["data"]
     seg = init_pt_cld[:, 6]
@@ -184,17 +186,17 @@ def report_progress(params, data, i, progress_bar, every_i=100):
         progress_bar.update(every_i)
 
 
-def train(seq, exp):
-    if os.path.exists(f"./output/{exp}/{seq}"):
-        print(f"Experiment '{exp}' for sequence '{seq}' already exists. Exiting.")
-        return
-    md = json.load(open(f"./data/{seq}/train_meta.json", 'r'))  # metadata
+def train(exp):
+    # if os.path.exists(f"./output/{exp}/{seq}"):
+    #     print(f"Experiment '{exp}' for sequence '{seq}' already exists. Exiting.")
+    #     return
+    md = json.load(open(f"./data/{seq}/train_meta.json", 'r'))  # TODO:
     num_timesteps = len(md['fn'])
-    params, variables = initialize_params(seq, md)
+    params, variables = initialize_params(seq, md)  # TODO:
     optimizer = initialize_optimizer(params, variables)
     output_params = []
     for t in range(num_timesteps):
-        dataset = get_dataset(t, md, seq)
+        dataset = get_dataset(t, md)  # TODO:
         todo_dataset = []
         is_initial_timestep = (t == 0)
         if not is_initial_timestep:
@@ -215,11 +217,10 @@ def train(seq, exp):
         output_params.append(params2cpu(params, is_initial_timestep))
         if is_initial_timestep:
             variables = initialize_post_first_timestep(params, variables, optimizer)
-    save_params(output_params, seq, exp)
+    save_params(output_params, exp)
 
 
 if __name__ == "__main__":
     exp_name = "exp1"
-    for sequence in ["basketball", "boxes", "football", "juggle", "softball", "tennis"]:
-        train(sequence, exp_name)
-        torch.cuda.empty_cache()
+    train(exp_name)
+    # torch.cuda.empty_cache()
