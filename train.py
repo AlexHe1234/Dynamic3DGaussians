@@ -10,22 +10,44 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from helpers import setup_camera, l1_loss_v1, l1_loss_v2, weighted_l2_loss_v1, weighted_l2_loss_v2, quat_mult, \
     o3d_knn, params2rendervar, params2cpu, save_params
 from external import calc_ssim, calc_psnr, build_rotation, densify, update_params_and_optimizer
+import matplotlib.pyplot as plt
 
 
-# TODO:
-def get_dataset(t, md, seq):
+def get_dataset(t, cams, ims, root_dir):
     dataset = []
-    for c in range(len(md['fn'][t])):
-        w, h, k, w2c = md['w'], md['h'], md['k'][t][c], md['w2c'][t][c]
-        cam = setup_camera(w, h, k, w2c, near=1.0, far=100)
-        fn = md['fn'][t][c]
-        im = np.array(copy.deepcopy(Image.open(f"./data/{seq}/ims/{fn}")))
-        im = torch.tensor(im).float().cuda().permute(2, 0, 1) / 255
-        seg = np.array(copy.deepcopy(Image.open(f"./data/{seq}/seg/{fn.replace('.jpg', '.png')}"))).astype(np.float32)
-        seg = torch.tensor(seg).float().cuda()
+    for c in range(len(cams['K'])):
+        k = cams['K'][c]
+        w2c = np.zeros((4, 4), dtype=np.float32)
+        w2c[3, 3] = 1.
+        w2c[:3, :3] = cams['R'][c]
+        w2c[:3, 3] = cams['T'][c].squeeze() / 1000.
+        img_path = os.path.join(root_dir, ims[t]['ims'][c])
+        img = np.array(Image.open(img_path)) / 255.
+        H, W = img.shape[:2]
+        cam = setup_camera(W, H, k, w2c, near=1.0, far=100.)
+        mask = np.array(Image.open(img_path.replace('images', 'masks')))[..., 0] > 0.5  # bool array
+        img = img * mask[..., None]
+        img = torch.tensor(img).float().cuda().permute(2, 0, 1)
+        seg = torch.tensor(np.zeros_like(mask, dtype=np.float32)).float().cuda()
+        seg[mask] = 1.
         seg_col = torch.stack((seg, torch.zeros_like(seg), 1 - seg))
-        dataset.append({'cam': cam, 'im': im, 'seg': seg_col, 'id': c})
+        dataset.append({'cam': cam, 'im': img, 'seg': seg_col, 'id': c})
     return dataset
+
+
+# def get_dataset(t, md, seq):
+#     dataset = []
+#     for c in range(len(md['fn'][t])):
+#         w, h, k, w2c = md['w'], md['h'], md['k'][t][c], md['w2c'][t][c]
+#         cam = setup_camera(w, h, k, w2c, near=1.0, far=100)
+#         fn = md['fn'][t][c]
+#         im = np.array(copy.deepcopy(Image.open(f"./data/{seq}/ims/{fn}")))
+#         im = torch.tensor(im).float().cuda().permute(2, 0, 1) / 255
+#         seg = np.array(copy.deepcopy(Image.open(f"./data/{seq}/seg/{fn.replace('.jpg', '.png')}"))).astype(np.float32)
+#         seg = torch.tensor(seg).float().cuda()
+#         seg_col = torch.stack((seg, torch.zeros_like(seg), 1 - seg))
+#         dataset.append({'cam': cam, 'im': im, 'seg': seg_col, 'id': c})
+#     return dataset
 
 
 def get_batch(todo_dataset, dataset):
@@ -35,16 +57,15 @@ def get_batch(todo_dataset, dataset):
     return curr_data
 
 
-# TODO:
-def initialize_params(seq, md):
-    init_pt_cld = np.load(f"./data/{seq}/init_pt_cld.npz")["data"]
-    seg = init_pt_cld[:, 6]
-    max_cams = 50
-    sq_dist, _ = o3d_knn(init_pt_cld[:, :3], 3)
+def initialize_params(cams, init_pt_cld):
+    # init_pt_cld = np.load(f"./data/{seq}/init_pt_cld.npz")["data"]
+    seg = np.ones_like(init_pt_cld[:, 0])
+    max_cams = len(cams['K'])
+    sq_dist, _ = o3d_knn(init_pt_cld, 3)
     mean3_sq_dist = sq_dist.mean(-1).clip(min=0.0000001)
     params = {
-        'means3D': init_pt_cld[:, :3],
-        'rgb_colors': init_pt_cld[:, 3:6],
+        'means3D': init_pt_cld,
+        'rgb_colors': np.ones_like(init_pt_cld),
         'seg_colors': np.stack((seg, np.zeros_like(seg), 1 - seg), -1),
         'unnorm_rotations': np.tile([1, 0, 0, 0], (seg.shape[0], 1)),
         'logit_opacities': np.zeros((seg.shape[0], 1)),
@@ -54,7 +75,9 @@ def initialize_params(seq, md):
     }
     params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in
               params.items()}
-    cam_centers = np.linalg.inv(md['w2c'][0])[:, :3, 3]  # Get scene radius
+    rs = np.stack(cams['R'])  # C, 3, 3
+    ts = np.stack(cams['T']) / 1000.  # C, 3, 1
+    cam_centers = -np.matmul(rs.transpose((0, 2, 1)), ts)[..., 0]  # C, 3, 1
     scene_radius = 1.1 * np.max(np.linalg.norm(cam_centers - np.mean(cam_centers, 0)[None], axis=-1))
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'scene_radius': scene_radius,
@@ -190,13 +213,18 @@ def train(exp):
     # if os.path.exists(f"./output/{exp}/{seq}"):
     #     print(f"Experiment '{exp}' for sequence '{seq}' already exists. Exiting.")
     #     return
-    md = json.load(open(f"./data/{seq}/train_meta.json", 'r'))  # TODO:
-    num_timesteps = len(md['fn'])
-    params, variables = initialize_params(seq, md)  # TODO:
+    # md = json.load(open(f"./data/{seq}/train_meta.json", 'r')) 
+    root_dir = 'data/NHR/sport_1_easymocap'
+    annot = np.load('data/NHR/sport_1_easymocap/annots.npy', allow_pickle=True).item()
+    first_frame_pcd = np.load('data/NHR/sport_1_easymocap/vertices/0.npy')
+    cams = annot['cams']
+    ims = annot['ims']
+    num_timesteps = len(ims)
+    params, variables = initialize_params(cams, first_frame_pcd)
     optimizer = initialize_optimizer(params, variables)
     output_params = []
     for t in range(num_timesteps):
-        dataset = get_dataset(t, md)  # TODO:
+        dataset = get_dataset(t, cams, ims, root_dir)
         todo_dataset = []
         is_initial_timestep = (t == 0)
         if not is_initial_timestep:
@@ -221,6 +249,6 @@ def train(exp):
 
 
 if __name__ == "__main__":
-    exp_name = "exp1"
+    exp_name = "nhr_sport1"
     train(exp_name)
     # torch.cuda.empty_cache()
